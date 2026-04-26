@@ -4,7 +4,7 @@
   "type": "module",
   "main": "api/index.js",
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   },
   "dependencies": {
     "express": "^4.19.2",
@@ -12,6 +12,6 @@
   },
   "scripts": {
     "start": "node api/index.js",
-    "postinstall": "curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o ./yt-dlp_linux && chmod +x ./yt-dlp_linux"
+    "install-yt-dlp": "curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o /tmp/yt-dlp_linux && chmod +x /tmp/yt-dlp_linux"
   }
 }
