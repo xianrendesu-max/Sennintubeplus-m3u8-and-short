@@ -25,7 +25,7 @@ async function getYouTube() {
 function validateYouTubeId(req, res, next) {
   const { id } = req.params;
   if (!/^[\w-]{11}$/.test(id)) {
-    return res.status(400).json({ error: "validateYouTubeIdでエラー" });
+    return res.status(400).json({ error: "無効なYouTube IDです" });
   }
   next();
 }
@@ -37,7 +37,7 @@ function fetchConfigJson(url) {
       let data = "";
       if (res.statusCode !== 200) {
         res.resume();
-        return reject(new Error("fetchConfigJsonでエラー"));
+        return reject(new Error("設定ファイルの取得に失敗しました"));
       }
       res.on("data", (chunk) => (data += chunk));
       res.on("end", () => {
@@ -45,10 +45,10 @@ function fetchConfigJson(url) {
           const json = JSON.parse(data);
           resolve(json);
         } catch {
-          reject(new Error("fetchConfigJsonでエラー"));
+          reject(new Error("JSONのパースに失敗しました"));
         }
       });
-    }).on("error", () => reject(new Error("fetchConfigJsonでエラー")));
+    }).on("error", () => reject(new Error("ネットワークエラーが発生しました")));
   });
 }
 
@@ -57,16 +57,16 @@ function fetchConfigJson(url) {
 // 1. Shorts検索
 router.get("/shorts/search", async (req, res) => {
   const query = req.query.q;
-  if (!query) return res.status(400).json({ error: "Query 'q' is required" });
+  if (!query) return res.status(400).json({ error: "クエリパラメータ 'q' が必要です" });
 
   try {
     const youtube = await getYouTube();
     const result = await youtube.search(query, { type: 'video' });
 
     let shortsResults = [];
-    const shelf = result.results.find(item => item.type === 'ReelShelf');
     
-    // ReelShelf（Shorts枠）から抽出
+    // 1. ReelShelf（Shorts専用セクション）からの抽出
+    const shelf = result.results.find(item => item.type === 'ReelShelf');
     if (shelf && shelf.items) {
       shortsResults = shelf.items.map(v => ({
         id: v.id,
@@ -77,7 +77,7 @@ router.get("/shorts/search", async (req, res) => {
       }));
     }
 
-    // 通常動画の中から60秒以下をShortsとして抽出
+    // 2. 通常の動画結果から60秒以下のものを抽出
     const normalShorts = result.videos
       .filter(v => v.duration?.seconds <= 60)
       .map(v => ({
@@ -88,29 +88,33 @@ router.get("/shorts/search", async (req, res) => {
         m3u8ApiUrl: `https://${req.headers.host}/api/shorts/m3u8/${v.id}`
       }));
 
+    // 重複を削除して結合
     const combined = [...new Map([...shortsResults, ...normalShorts].map(v => [v.id, v])).values()];
-    res.json({ success: true, results: combined });
+    
+    res.json({ success: true, count: combined.length, results: combined });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 2. m3u8 URL 直接抽出
+// 2. m3u8 URL 直接抽出 (Shorts/通常動画共通)
 router.get("/shorts/m3u8/:id", validateYouTubeId, async (req, res) => {
   const { id } = req.params;
   try {
     const youtube = await getYouTube();
     const info = await youtube.getInfo(id);
     
+    // HLS(m3u8)マニフェストURLを取得
     const hlsUrl = info.streaming_data?.hls_manifest_url || null;
     
     if (!hlsUrl) {
-      return res.status(404).json({ error: "m3u8 URLが見つかりませんでした。" });
+      return res.status(404).json({ error: "この動画のm3u8 URLは見つかりませんでした。" });
     }
 
     res.json({
       id: id,
       title: info.basic_info.title,
+      description: info.basic_info.short_description,
       m3u8: hlsUrl,
       proxy_m3u8: `https://proxy-siawaseok.duckdns.org/proxy/m3u8?url=${encodeURIComponent(hlsUrl)}`
     });
@@ -121,7 +125,7 @@ router.get("/shorts/m3u8/:id", validateYouTubeId, async (req, res) => {
 
 // ================= 既存機能 (維持) =================
 
-// type1
+// type1: YouTube Education経由の埋め込みURL
 router.get("/:id", validateYouTubeId, async (req, res) => {
   const { id } = req.params;
   try {
@@ -129,14 +133,14 @@ router.get("/:id", validateYouTubeId, async (req, res) => {
     const params = config.params || "";
     res.json({ url: `https://www.youtubeeducation.com/embed/${id}${params}` });
   } catch {
-    res.status(500).json({ error: "type1でエラー" });
+    res.status(500).json({ error: "type1の設定読み込みエラー" });
   }
 });
 
-// type2
+// type2: 高度なストリーム解析
 router.get("/:id/type2", validateYouTubeId, async (req, res) => {
   const { id } = req.params;
-  // 注意: Vercel環境では 127.0.0.1 へのリクエストは失敗するため、適切な外部URLへの書き換えを推奨
+  // 内部ストリームAPIへのリクエスト (外部からアクセス可能なURLにするか、直接youtubei.jsを使う処理に統合推奨)
   const apiUrl = `http://127.0.0.1:3006/api/streams/${id}`;
 
   const parseHeight = (format) => {
@@ -146,14 +150,14 @@ router.get("/:id/type2", validateYouTubeId, async (req, res) => {
   };
 
   const selectUrlLocal = (urls) => {
-    if (!urls?.length) return null;
-    const jaUrl = urls.find((u) => decodeURIComponent(u).includes("lang=ja"));
+    if (!urls || urls.length === 0) return null;
+    const jaUrl = urls.find((u) => typeof u === 'string' && decodeURIComponent(u).includes("lang=ja"));
     return jaUrl || urls;
   };
 
   try {
     const response = await fetch(apiUrl);
-    if (!response.ok) throw new Error(`local API取得エラー: ${response.status}`);
+    if (!response.ok) throw new Error(`Stream API Error: ${response.status}`);
 
     const data = await response.json();
     const formats = Array.isArray(data.formats) ? data.formats : [];
@@ -161,11 +165,12 @@ router.get("/:id/type2", validateYouTubeId, async (req, res) => {
     const videourl = {};
     const m3u8 = {};
 
-    const audioUrls = formats.filter((f) => f.acodec !== "none" && f.vcodec === "none").map((f) => f.url);
-    const audioOnlyUrl = selectUrlLocal(audioUrls);
+    const audioOnlyFormats = formats.filter((f) => f.acodec !== "none" && f.vcodec === "none");
+    const audioOnlyUrl = selectUrlLocal(audioOnlyFormats.map(f => f.url));
 
     const extPriority = ["webm", "mp4", "av1"];
     const formatsByHeight = {};
+
     for (const f of formats) {
       const height = parseHeight(f);
       if (!height || f.vcodec === "none" || !f.url) continue;
@@ -186,35 +191,35 @@ router.get("/:id/type2", validateYouTubeId, async (req, res) => {
 
       if (normalList.length > 0) {
         videourl[label] = {
-          video: { url: selectUrlLocal([normalList.url]) },
+          video: { url: selectUrlLocal(normalList.map(f => f.url)) },
           audio: { url: audioOnlyUrl },
         };
       }
     }
     res.json({ videourl, m3u8 });
   } catch (e) {
-    res.status(500).json({ error: "type2でエラー" });
+    res.status(500).json({ error: "type2の解析に失敗しました。内部APIが起動しているか確認してください。" });
   }
 });
 
-// download
-router.get("/download/:id", async (req, res) => {
+// download: 全フォーマットの一覧取得
+router.get("/download/:id", validateYouTubeId, async (req, res) => {
   const { id } = req.params;
   try {
     const response = await fetch(`http://127.0.0.1:3006/api/streams/${id}`);
-    if (!response.ok) return res.status(response.status).json({ error: "Failed to fetch stream data" });
+    if (!response.ok) return res.status(response.status).json({ error: "ストリームデータの取得に失敗しました" });
 
     const data = await response.json();
-    if (!data.formats || !Array.isArray(data.formats)) return res.status(500).json({ error: "Invalid format data" });
+    if (!data.formats || !Array.isArray(data.formats)) return res.status(500).json({ error: "無効なフォーマット形式です" });
 
     const result = { "audio only": [], "video only": [], "audio&video": [], "m3u8 raw": [], "m3u8 proxy": [] };
 
     for (const f of data.formats) {
       if (!f.url) continue;
-      const url = f.url.toLowerCase();
-      if (url.includes("lang=") && !url.includes("lang=ja")) continue;
+      const urlLower = f.url.toLowerCase();
+      if (urlLower.includes("lang=") && !urlLower.includes("lang=ja")) continue;
 
-      if (url.endsWith(".m3u8")) {
+      if (urlLower.includes(".m3u8")) {
         const m3u8Data = { url: f.url, resolution: f.resolution, vcodec: f.vcodec, acodec: f.acodec };
         result["m3u8 raw"].push(m3u8Data);
         result["m3u8 proxy"].push({
@@ -234,11 +239,17 @@ router.get("/download/:id", async (req, res) => {
     }
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: "Internal server error" });
+    res.status(500).json({ error: "サーバー内部エラーが発生しました" });
   }
 });
 
 // アプリケーションへマウント
 app.use("/api", router);
+
+// ポート設定（Vercel以外での実行用）
+const PORT = process.env.PORT || 3000;
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+}
 
 export default app;
