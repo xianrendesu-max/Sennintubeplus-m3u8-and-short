@@ -1,255 +1,653 @@
 import express from "express";
-import https from "https";
-import fetch from "node-fetch";
-import { Innertube } from "youtubei.js";
+import { Innertube, UniversalCache } from "youtubei.js";
+import { execFile } from "child_process";
+import path from "path";
 
 const app = express();
-const router = express.Router();
+const ytdlpPath = path.resolve(process.cwd(), 'yt-dlp_linux');
+const PROXY_URL = "http://ytproxy-siawaseok.duckdns.org:3007";
 
-let yt;
-const CONFIG_URL = "https://raw.githubusercontent.com/siawaseok3/wakame/master/video_config.json";
+app.use(express.json());
 
-// YouTube.jsの初期化（シングルトン）
-async function getYouTube() {
-  if (!yt) {
-    yt = await Innertube.create({ 
-      lang: "ja", 
-      location: "JP", 
-      retrieve_player: true 
-    });
-  }
-  return yt;
-}
-
-// YouTube ID バリデーション
-function validateYouTubeId(req, res, next) {
-  const { id } = req.params;
-  if (!/^[\w-]{11}$/.test(id)) {
-    return res.status(400).json({ error: "無効なYouTube IDです" });
-  }
+// CORS設定
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
   next();
-}
+});
 
-// 設定ファイル取得
-function fetchConfigJson(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, (res) => {
-      let data = "";
-      if (res.statusCode !== 200) {
-        res.resume();
-        return reject(new Error("設定ファイルの取得に失敗しました"));
-      }
-      res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => {
-        try {
-          const json = JSON.parse(data);
-          resolve(json);
-        } catch {
-          reject(new Error("JSONのパースに失敗しました"));
-        }
-      });
-    }).on("error", () => reject(new Error("ネットワークエラーが発生しました")));
-  });
-}
+// YouTubeクライアントの作成ヘルパー
+const createYoutube = async () => {
+  const options = {
+    lang: "ja",
+    location: "JP",
+    cache: new UniversalCache(false), 
+    generate_session_locally: true,
+  };
+  return await Innertube.create(options);
+};
 
-// ================= 新機能: Shorts検索 & m3u8 直接取得 =================
+// -------------------------------------------------------------------
+// 既存の機能群
+// -------------------------------------------------------------------
 
-// 1. Shorts検索
-router.get("/shorts/search", async (req, res) => {
-  const query = req.query.q;
-  if (!query) return res.status(400).json({ error: "クエリパラメータ 'q' が必要です" });
-
+app.get('/api/shortstdata', async (req, res) => {
   try {
-    const youtube = await getYouTube();
-    const result = await youtube.search(query, { type: 'video' });
-
-    let shortsResults = [];
-    
-    // 1. ReelShelf（Shorts専用セクション）からの抽出
-    const shelf = result.results.find(item => item.type === 'ReelShelf');
-    if (shelf && shelf.items) {
-      shortsResults = shelf.items.map(v => ({
-        id: v.id,
-        title: v.title?.toString() || "無題",
-        author: v.author?.name || "不明",
-        thumbnails: v.thumbnails,
-        m3u8ApiUrl: `https://${req.headers.host}/api/shorts/m3u8/${v.id}`
-      }));
-    }
-
-    // 2. 通常の動画結果から60秒以下のものを抽出
-    const normalShorts = result.videos
-      .filter(v => v.duration?.seconds <= 60)
-      .map(v => ({
-        id: v.id,
-        title: v.title.text,
-        author: v.author.name,
-        thumbnails: v.thumbnails,
-        m3u8ApiUrl: `https://${req.headers.host}/api/shorts/m3u8/${v.id}`
-      }));
-
-    // 重複を削除して結合
-    const combined = [...new Map([...shortsResults, ...normalShorts].map(v => [v.id, v])).values()];
-    
-    res.json({ success: true, count: combined.length, results: combined });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing video id" });
+    const info = await youtube.getInfo(id);
+    res.status(200).json(info);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-// 2. m3u8 URL 直接抽出 (Shorts/通常動画共通)
-router.get("/shorts/m3u8/:id", validateYouTubeId, async (req, res) => {
-  const { id } = req.params;
+app.get('/api/suggest', async (req, res) => {
+    const { q } = req.query;
+    if (!q) return res.json([]);
+    try {
+        const url = `https://suggestqueries.google.com/complete/search?client=youtube&ds=yt&q=${encodeURIComponent(q)}`;
+        const response = await fetch(url);
+        const text = await response.text();
+        const match = text.match(/window\.google\.ac\.h\((.*)\)/);
+        if (match && match) {
+            const data = JSON.parse(match);
+            const suggestions = data.map(item => item);
+            return res.json(suggestions);
+        }
+        res.json([]);
+    } catch (err) {
+        res.json([]);
+    }
+});
+
+app.get('/api/video-proxy', async (req, res) => {
+  const { url } = req.query;
+  if (!url || typeof url !== 'string') return res.status(400).end();
   try {
-    const youtube = await getYouTube();
+    const headers = {};
+    if (req.headers.range) headers['Range'] = req.headers.range;
+    headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+    const response = await fetch(url, { headers });
+    if (!response.ok) return res.status(response.status).end();
+    const forwardHeaders = ['content-range', 'content-length', 'content-type', 'accept-ranges'];
+    forwardHeaders.forEach(name => {
+        const val = response.headers.get(name);
+        if (val) res.setHeader(name, val);
+    });
+    res.status(response.status);
+    if (!response.body) return res.end();
+    // @ts-ignore
+    const reader = response.body.getReader();
+    req.on('close', () => { reader.cancel().catch(() => {}); });
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(value);
+    }
+    res.end();
+  } catch (err) {
+    if (!res.headersSent) res.status(500).end();
+  }
+});
+
+app.get('/api/video', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing video id" });
     const info = await youtube.getInfo(id);
     
-    // HLS(m3u8)マニフェストURLを取得
-    const hlsUrl = info.streaming_data?.hls_manifest_url || null;
+    let allCandidates = [];
+    const addCandidates = (source) => { if (Array.isArray(source)) allCandidates.push(...source); };
+    addCandidates(info.watch_next_feed);
+    addCandidates(info.related_videos);
     
-    if (!hlsUrl) {
-      return res.status(404).json({ error: "この動画のm3u8 URLは見つかりませんでした。" });
-    }
-
-    res.json({
-      id: id,
-      title: info.basic_info.title,
-      description: info.basic_info.short_description,
-      m3u8: hlsUrl,
-      proxy_m3u8: `https://proxy-siawaseok.duckdns.org/proxy/m3u8?url=${encodeURIComponent(hlsUrl)}`
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ================= 既存機能 (維持) =================
-
-// type1: YouTube Education経由の埋め込みURL
-router.get("/:id", validateYouTubeId, async (req, res) => {
-  const { id } = req.params;
-  try {
-    const config = await fetchConfigJson(CONFIG_URL);
-    const params = config.params || "";
-    res.json({ url: `https://www.youtubeeducation.com/embed/${id}${params}` });
-  } catch {
-    res.status(500).json({ error: "type1の設定読み込みエラー" });
-  }
-});
-
-// type2: 高度なストリーム解析
-router.get("/:id/type2", validateYouTubeId, async (req, res) => {
-  const { id } = req.params;
-  // 内部ストリームAPIへのリクエスト (外部からアクセス可能なURLにするか、直接youtubei.jsを使う処理に統合推奨)
-  const apiUrl = `http://127.0.0.1:3006/api/streams/${id}`;
-
-  const parseHeight = (format) => {
-    if (typeof format.height === "number") return format.height;
-    const match = /x(\d+)/.exec(format.resolution || "");
-    return match ? parseInt(match) : null;
-  };
-
-  const selectUrlLocal = (urls) => {
-    if (!urls || urls.length === 0) return null;
-    const jaUrl = urls.find((u) => typeof u === 'string' && decodeURIComponent(u).includes("lang=ja"));
-    return jaUrl || urls;
-  };
-
-  try {
-    const response = await fetch(apiUrl);
-    if (!response.ok) throw new Error(`Stream API Error: ${response.status}`);
-
-    const data = await response.json();
-    const formats = Array.isArray(data.formats) ? data.formats : [];
-
-    const videourl = {};
-    const m3u8 = {};
-
-    const audioOnlyFormats = formats.filter((f) => f.acodec !== "none" && f.vcodec === "none");
-    const audioOnlyUrl = selectUrlLocal(audioOnlyFormats.map(f => f.url));
-
-    const extPriority = ["webm", "mp4", "av1"];
-    const formatsByHeight = {};
-
-    for (const f of formats) {
-      const height = parseHeight(f);
-      if (!height || f.vcodec === "none" || !f.url) continue;
-      const label = `${height}p`;
-      if (!formatsByHeight[label]) formatsByHeight[label] = [];
-      formatsByHeight[label].push(f);
-    }
-
-    for (const [label, list] of Object.entries(formatsByHeight)) {
-      const m3u8List = list.filter((f) => f.url.includes(".m3u8"));
-      if (m3u8List.length > 0) {
-        m3u8[label] = { url: { url: selectUrlLocal(m3u8List.map((f) => f.url)) } };
+    try {
+      let currentFeed = info; 
+      const seenIds = new Set();
+      const relatedVideos = [];
+      const MAX_VIDEOS = 40; 
+      
+      for (const video of allCandidates) {
+         if(video.id) seenIds.add(video.id);
+         relatedVideos.push(video);
       }
-
-      const normalList = list
-        .filter((f) => !f.url.includes(".m3u8"))
-        .sort((a, b) => extPriority.indexOf(a.ext || "") - extPriority.indexOf(b.ext || ""));
-
-      if (normalList.length > 0) {
-        videourl[label] = {
-          video: { url: selectUrlLocal(normalList.map(f => f.url)) },
-          audio: { url: audioOnlyUrl },
-        };
+      
+      if (relatedVideos.length < MAX_VIDEOS && typeof currentFeed.getWatchNextContinuation === 'function') {
+          currentFeed = await currentFeed.getWatchNextContinuation();
+          if (currentFeed && Array.isArray(currentFeed.watch_next_feed)) {
+              for (const video of currentFeed.watch_next_feed) {
+                  if (video.id && !seenIds.has(video.id)) {
+                      seenIds.add(video.id);
+                      relatedVideos.push(video);
+                  }
+              }
+          }
       }
-    }
-    res.json({ videourl, m3u8 });
-  } catch (e) {
-    res.status(500).json({ error: "type2の解析に失敗しました。内部APIが起動しているか確認してください。" });
-  }
-});
+      info.watch_next_feed = relatedVideos;
+    } catch (e) { console.warn('[API] Continuation failed', e.message); }
 
-// download: 全フォーマットの一覧取得
-router.get("/download/:id", validateYouTubeId, async (req, res) => {
-  const { id } = req.params;
-  try {
-    const response = await fetch(`http://127.0.0.1:3006/api/streams/${id}`);
-    if (!response.ok) return res.status(response.status).json({ error: "ストリームデータの取得に失敗しました" });
-
-    const data = await response.json();
-    if (!data.formats || !Array.isArray(data.formats)) return res.status(500).json({ error: "無効なフォーマット形式です" });
-
-    const result = { "audio only": [], "video only": [], "audio&video": [], "m3u8 raw": [], "m3u8 proxy": [] };
-
-    for (const f of data.formats) {
-      if (!f.url) continue;
-      const urlLower = f.url.toLowerCase();
-      if (urlLower.includes("lang=") && !urlLower.includes("lang=ja")) continue;
-
-      if (urlLower.includes(".m3u8")) {
-        const m3u8Data = { url: f.url, resolution: f.resolution, vcodec: f.vcodec, acodec: f.acodec };
-        result["m3u8 raw"].push(m3u8Data);
-        result["m3u8 proxy"].push({
-          ...m3u8Data,
-          url: `https://proxy-siawaseok.duckdns.org/proxy/m3u8?url=${encodeURIComponent(f.url)}`,
-        });
-        continue;
-      }
-
-      if (f.resolution === "audio only" || f.vcodec === "none") {
-        result["audio only"].push(f);
-      } else if (f.acodec === "none") {
-        result["video only"].push(f);
-      } else {
-        result["audio&video"].push(f);
-      }
-    }
-    res.json(result);
+    if (info.secondary_info) info.secondary_info.watch_next_feed = [];
+    info.related_videos = [];
+    info.related = [];
+    
+    res.status(200).json(info);
   } catch (err) {
-    res.status(500).json({ error: "サーバー内部エラーが発生しました" });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// アプリケーションへマウント
-app.use("/api", router);
+app.get('/api/search', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { q: query, page = '1', sort_by } = req.query;
+    if (!query) return res.status(400).json({ error: "Missing search query" });
 
-// ポート設定（Vercel以外での実行用）
-const PORT = process.env.PORT || 3000;
-if (process.env.NODE_ENV !== 'production') {
-  app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
-}
+    const targetPage = parseInt(page);
+    const ITEMS_PER_PAGE = 40; 
+    const filters = {};
+    if (sort_by) filters.sort_by = sort_by;
+
+    let search = await youtube.search(query, filters);
+    let allVideos = [...(search.videos || [])];
+    let allShorts = [...(search.shorts || [])];
+    let allChannels = [...(search.channels || [])];
+    let allPlaylists = [...(search.playlists || [])];
+
+    const requiredCount = targetPage * ITEMS_PER_PAGE;
+    let continuationAttempts = 0;
+    const MAX_ATTEMPTS = 15; 
+
+    while (allVideos.length < requiredCount && search.has_continuation && continuationAttempts < MAX_ATTEMPTS) {
+        search = await search.getContinuation();
+        if (search.videos) allVideos.push(...search.videos);
+        if (search.shorts) allShorts.push(...search.shorts);
+        if (search.channels) allChannels.push(...search.channels);
+        if (search.playlists) allPlaylists.push(...search.playlists);
+        continuationAttempts++;
+    }
+
+    const startIndex = (targetPage - 1) * ITEMS_PER_PAGE;
+    const endIndex = startIndex + ITEMS_PER_PAGE;
+    
+    res.status(200).json({
+        videos: allVideos.slice(startIndex, endIndex),
+        shorts: targetPage === 1 ? allShorts : [],
+        channels: targetPage === 1 ? allChannels : [],
+        playlists: targetPage === 1 ? allPlaylists : [],
+        nextPageToken: allVideos.length > endIndex || search.has_continuation ? String(targetPage + 1) : undefined
+    });
+  } catch (err) { 
+      res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.get('/api/comments', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id, sort_by, continuation } = req.query;
+    
+    if (continuation) {
+        try {
+             const actions = youtube.actions;
+             const response = await actions.execute('/comment/get_comments', { continuation });
+             
+             const items = response.data?.onResponseReceivedEndpoints?.?.appendContinuationItemsAction?.continuationItems 
+                        || response.data?.onResponseReceivedEndpoints?.?.reloadContinuationItemsCommand?.continuationItems;
+             
+             if (!items) return res.json({ comments: [], continuation: null });
+             
+             const parsedComments = items.map(item => {
+                 const c = item.commentThreadRenderer?.comment?.commentRenderer || item.commentRenderer;
+                 if (!c) return null;
+                 return {
+                    text: c.contentText?.runs?.map(r => r.text).join('') || c.content?.text || '',
+                    comment_id: c.commentId,
+                    published_time: c.publishedTimeText?.runs?.?.text || '',
+                    author: { 
+                        id: c.authorEndpoint?.browseEndpoint?.browseId, 
+                        name: c.authorText?.simpleText || c.authorText?.runs?.?.text, 
+                        thumbnails: c.authorThumbnail?.thumbnails || [] 
+                    },
+                    like_count: c.voteCount?.simpleText || '0',
+                    reply_count: c.replyCount || '0',
+                    is_pinned: !!c.pinnedCommentBadge
+                 };
+             }).filter(c => c);
+             
+             const nextContinuation = items[items.length - 1]?.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token;
+             
+             return res.json({
+                 comments: parsedComments,
+                 continuation: nextContinuation
+             });
+
+        } catch (e) {
+            return res.status(500).json({ error: "Continuation failed: " + e.message });
+        }
+
+    } else {
+        if (!id) return res.status(400).json({ error: "Missing video id" });
+        const sortType = sort_by === 'newest' ? 'NEWEST_FIRST' : 'TOP_COMMENTS';
+        const commentsSection = await youtube.getComments(id, sortType);
+        
+        const allComments = commentsSection.contents || [];
+        const continuationToken = commentsSection.continuation_token;
+
+        res.status(200).json({
+          comments: allComments.map(c => ({
+            text: c.comment?.content?.text ?? null,
+            comment_id: c.comment?.comment_id ?? null,
+            published_time: c.comment?.published_time?.text ?? c.comment?.published_time ?? null,
+            author: { 
+                id: c.comment?.author?.id ?? null, 
+                name: c.comment?.author?.name?.text ?? c.comment?.author?.name ?? null, 
+                thumbnails: c.comment?.author?.thumbnails ?? [] 
+            },
+            like_count: c.comment?.like_count?.toString() ?? '0',
+            reply_count: c.comment?.reply_count?.toString() ?? '0',
+            is_pinned: c.comment?.is_pinned ?? false
+          })),
+          continuation: continuationToken
+        });
+    }
+  } catch (err) { 
+    res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.get('/api/stream', async (req, res) => {
+  const { id } = req.query;
+  if (!id) {
+    return res.status(400).json({ error: 'Missing video id' });
+  }
+
+  const youtubeUrl = `https://www.youtube.com/watch?v=${id}`;
+  const args = ['--proxy', PROXY_URL, '--dump-json', youtubeUrl];
+
+  execFile(ytdlpPath, args, (error, stdout, stderr) => {
+    if (error) {
+      console.error('yt-dlp error:', stderr);
+      return res.status(500).json({
+        error: 'yt-dlp failed',
+        details: stderr
+      });
+    }
+
+    try {
+      const info = JSON.parse(stdout);
+      const combinedFormats = info.formats
+        .filter(f => f.vcodec !== 'none' && f.acodec !== 'none' && f.ext === 'mp4' && (f.protocol === 'https' || f.protocol === 'http'))
+        .sort((a, b) => (b.height || 0) - (a.height || 0));
+
+      const streamingFormat = combinedFormats || null;
+
+      const audioFormats = info.formats
+        .filter(f => f.vcodec === 'none' && f.acodec !== 'none' && (f.protocol === 'https' || f.protocol === 'http'))
+        .sort((a, b) => (b.abr || 0) - (a.abr || 0));
+
+      const bestAudio = audioFormats.find(f => f.ext === 'm4a') || audioFormats || null;
+
+      res.json({
+        title: info.title,
+        duration: info.duration,
+        streamingUrl: streamingFormat?.url ?? null,
+        audioUrl: bestAudio?.url ?? null,
+        formats: combinedFormats.map(f => ({
+          quality: f.format_note || `${f.height}p`,
+          height: f.height,
+          container: f.ext,
+          url: f.url
+        }))
+      });
+    } catch (e) {
+      console.error('JSON parse error:', e);
+      res.status(500).json({ error: 'Failed to parse yt-dlp output' });
+    }
+  });
+});
+
+const applyChannelFilter = async (feed, sort) => {
+    if (!sort || sort === 'latest') return feed;
+    const filters = ['Popular', '人気順', 'Most popular'];
+    let targetFilters = [];
+    if (sort === 'popular') targetFilters = ['Popular', '人気順', 'Most popular'];
+    if (sort === 'oldest') targetFilters = ['Oldest', '古い順'];
+
+    for (const f of targetFilters) {
+        try {
+            const newFeed = await feed.applyFilter(f);
+            if (newFeed) return newFeed;
+        } catch (e) {}
+    }
+    return feed;
+};
+
+app.get('/api/channel', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id, page = '1', sort } = req.query; 
+    if (!id) return res.status(400).json({ error: "Missing channel id" });
+
+    const channel = await youtube.getChannel(id);
+    let videosFeed = await channel.getVideos();
+    videosFeed = await applyChannelFilter(videosFeed, sort);
+
+    let videosToReturn = videosFeed.videos || [];
+    const targetPage = parseInt(page);
+    
+    if (targetPage > 1) {
+        for (let i = 1; i < targetPage; i++) {
+            if (videosFeed.has_continuation) {
+                videosFeed = await videosFeed.getContinuation();
+                videosToReturn = videosFeed.videos || [];
+            } else {
+                videosToReturn = [];
+                break;
+            }
+        }
+    }
+    
+    const title = channel.metadata?.title || channel.header?.title?.text || channel.header?.author?.name || null;
+    let avatar = channel.metadata?.avatar || channel.header?.avatar || channel.header?.author?.thumbnails || null;
+    if (Array.isArray(avatar) && avatar.length > 0) avatar = avatar.url;
+    else if (typeof avatar === 'object' && avatar?.url) avatar = avatar.url;
+
+    let banner = channel.metadata?.banner || channel.header?.banner || null;
+    if (Array.isArray(banner) && banner.length > 0) banner = banner.url;
+    else if (typeof banner === 'object' && banner?.url) banner = banner.url;
+    else if (typeof banner !== 'string') banner = null; 
+
+    res.status(200).json({
+      channel: {
+        id: channel.id, 
+        name: title, 
+        description: channel.metadata?.description || null,
+        avatar: avatar, 
+        banner: banner,
+        subscriberCount: channel.metadata?.subscriber_count?.pretty || '非公開', 
+        videoCount: channel.metadata?.videos_count?.text ?? channel.metadata?.videos_count ?? '0'
+      },
+      page: targetPage, 
+      videos: videosToReturn,
+      nextPageToken: videosFeed.has_continuation ? String(targetPage + 1) : undefined
+    });
+  } catch (err) { 
+      res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.get('/api/channel-shorts', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing channel id" });
+    const channel = await youtube.getChannel(id);
+    const shortsFeed = await channel.getShorts();
+    let shorts = [];
+    if (shortsFeed.videos) {
+        shorts = shortsFeed.videos;
+    } else if (shortsFeed.contents && Array.isArray(shortsFeed.contents)) {
+        const tabContent = shortsFeed.contents;
+        if (tabContent && tabContent.contents) shorts = tabContent.contents;
+    }
+    res.status(200).json(shorts);
+  } catch (err) { 
+      res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.get('/api/channel-live', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing channel id" });
+    const channel = await youtube.getChannel(id);
+    const liveFeed = await channel.getLiveStreams();
+    res.status(200).json({ videos: liveFeed.videos || [] });
+  } catch (err) {
+      res.status(200).json({ videos: [] });
+  }
+});
+
+app.get('/api/channel-community', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing channel id" });
+    const channel = await youtube.getChannel(id);
+    const community = await channel.getCommunity();
+    const posts = community.posts?.map(post => ({
+        id: post.id,
+        text: post.content?.text || "",
+        publishedTime: post.published.text,
+        likeCount: post.vote_count?.text || "0",
+        author: { name: post.author.name, avatar: post.author.thumbnails?.url },
+        attachment: post.attachment ? {
+            type: post.attachment.type,
+            images: post.attachment.images?.map(i => i.url),
+            choices: post.attachment.choices?.map(c => c.text.text),
+            videoId: post.attachment.video?.id
+        } : null
+    })) || [];
+    res.status(200).json({ posts });
+  } catch (err) {
+      res.status(200).json({ posts: [] });
+  }
+});
+
+app.get('/api/channel-playlists', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing channel id" });
+    const channel = await youtube.getChannel(id);
+    const playlistsFeed = await channel.getPlaylists();
+    let playlists = playlistsFeed.playlists || playlistsFeed.items || [];
+    if (playlists.length === 0 && playlistsFeed.contents && Array.isArray(playlistsFeed.contents)) {
+        const tabContent = playlistsFeed.contents;
+        if (tabContent && tabContent.contents) playlists = tabContent.contents;
+    }
+    res.status(200).json({ playlists });
+  } catch (err) { 
+      res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.get('/api/playlist', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    const playlist = await youtube.getPlaylist(id);
+    if (!playlist.info?.id) return res.status(404).json({ error: "Playlist not found"});
+    res.status(200).json(playlist);
+  } catch (err) { 
+      res.status(500).json({ error: err.message }); 
+  }
+});
+
+app.get('/api/fvideo', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const homeFeed = await youtube.getHomeFeed();
+    res.status(200).json({ videos: homeFeed.videos || homeFeed.items || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -------------------------------------------------------------------
+// 🌟 ここから下が今回追加した youtubei.js の新機能群 🌟
+// -------------------------------------------------------------------
+
+// 1. 急上昇（トレンド）の取得
+app.get('/api/trending', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const trending = await youtube.getTrending();
+    res.status(200).json({
+      videos: trending.videos || [],
+      categories: trending.categories || []
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2. 探索・ガイド（Explore）の取得
+app.get('/api/explore', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const explore = await youtube.getExplore();
+    res.status(200).json(explore);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3. ハッシュタグ検索（例: /api/hashtag?tag=マイクラ）
+app.get('/api/hashtag', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { tag } = req.query;
+    if (!tag) return res.status(400).json({ error: "Missing tag query" });
+    
+    const hashtagFeed = await youtube.getHashtag(tag);
+    res.status(200).json({
+      header: hashtagFeed.header,
+      videos: hashtagFeed.videos || []
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. 動画の字幕（文字起こし）取得
+app.get('/api/transcript', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing video id" });
+
+    const info = await youtube.getInfo(id);
+    const transcriptInfo = await info.getTranscript();
+    
+    const segments = transcriptInfo?.transcript?.content?.body?.initial_segments?.map(seg => ({
+      text: seg.snippet?.text,
+      startTime: seg.start_ms,
+      endTime: seg.end_ms
+    })) || [];
+
+    res.status(200).json({ segments });
+  } catch (err) {
+    res.status(500).json({ error: "Transcript not available or " + err.message });
+  }
+});
+
+// 5. URLの解決 (URLから動画IDやチャンネルIDなどを特定)
+app.get('/api/resolve', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "Missing url" });
+
+    const result = await youtube.resolveURL(url);
+    res.status(200).json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- YouTube Music 機能群 (非常に安定しています) ---
+
+// 6. Music 検索
+app.get('/api/music/search', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { q, filter } = req.query; 
+    if (!q) return res.status(400).json({ error: "Missing query" });
+
+    const searchResult = await youtube.music.search(q, { type: filter });
+    res.status(200).json(searchResult);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 7. Music 楽曲の詳細（ストリーミング情報など）
+app.get('/api/music/track', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing track id" });
+
+    const trackInfo = await youtube.music.getInfo(id);
+    res.status(200).json(trackInfo);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. Music 歌詞の取得
+app.get('/api/music/lyrics', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing track id" });
+
+    const lyrics = await youtube.music.getLyrics(id);
+    res.status(200).json({
+       text: lyrics?.text || "No lyrics available",
+       footer: lyrics?.footer
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9. Music アーティスト情報の取得
+app.get('/api/music/artist', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing artist id" });
+
+    const artist = await youtube.music.getArtist(id);
+    res.status(200).json(artist);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 10. Music プレイリスト・アルバムの取得
+app.get('/api/music/playlist', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing playlist/album id" });
+
+    const playlist = await youtube.music.getPlaylist(id);
+    res.status(200).json(playlist);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 11. Music 「次に再生（Up Next / ラジオ）」の取得
+app.get('/api/music/upnext', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Missing track id" });
+
+    const upNext = await youtube.music.getUpNext(id);
+    res.status(200).json(upNext);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 export default app;
