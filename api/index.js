@@ -561,9 +561,28 @@ app.get('/api/resolve', async (req, res) => {
   }
 });
 
+// 6. ショート動画専用検索
+app.get('/api/search-short', async (req, res) => {
+  try {
+    const youtube = await createYoutube();
+    const { q: query } = req.query;
+    if (!query) return res.status(400).json({ error: "Missing search query" });
+
+    const search = await youtube.search(query, { type: 'video' });
+    // youtubei.jsの検索結果からshorts配列を抽出
+    const shorts = search.shorts || [];
+    
+    res.status(200).json({
+        shorts: shorts
+    });
+  } catch (err) { 
+      res.status(500).json({ error: err.message }); 
+  }
+});
+
 // --- YouTube Music 機能群 (非常に安定しています) ---
 
-// 6. Music 検索
+// 7. Music 検索
 app.get('/api/music/search', async (req, res) => {
   try {
     const youtube = await createYoutube();
@@ -577,7 +596,7 @@ app.get('/api/music/search', async (req, res) => {
   }
 });
 
-// 7. Music 楽曲の詳細（ストリーミング情報など）
+// 8. Music 楽曲の詳細（ストリーミング情報など）
 app.get('/api/music/track', async (req, res) => {
   try {
     const youtube = await createYoutube();
@@ -591,7 +610,7 @@ app.get('/api/music/track', async (req, res) => {
   }
 });
 
-// 8. Music 歌詞の取得
+// 9. Music 歌詞の取得
 app.get('/api/music/lyrics', async (req, res) => {
   try {
     const youtube = await createYoutube();
@@ -608,7 +627,7 @@ app.get('/api/music/lyrics', async (req, res) => {
   }
 });
 
-// 9. Music アーティスト情報の取得
+// 10. Music アーティスト情報の取得
 app.get('/api/music/artist', async (req, res) => {
   try {
     const youtube = await createYoutube();
@@ -622,7 +641,7 @@ app.get('/api/music/artist', async (req, res) => {
   }
 });
 
-// 10. Music プレイリスト・アルバムの取得
+// 11. Music プレイリスト・アルバムの取得
 app.get('/api/music/playlist', async (req, res) => {
   try {
     const youtube = await createYoutube();
@@ -636,7 +655,7 @@ app.get('/api/music/playlist', async (req, res) => {
   }
 });
 
-// 11. Music 「次に再生（Up Next / ラジオ）」の取得
+// 12. Music 「次に再生（Up Next / ラジオ）」の取得
 app.get('/api/music/upnext', async (req, res) => {
   try {
     const youtube = await createYoutube();
