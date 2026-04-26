@@ -195,30 +195,30 @@ app.get('/api/comments', async (req, res) => {
              const actions = youtube.actions;
              const response = await actions.execute('/comment/get_comments', { continuation });
              
-             const items = response.data?.onResponseReceivedEndpoints?.?.appendContinuationItemsAction?.continuationItems 
-                        || response.data?.onResponseReceivedEndpoints?.?.reloadContinuationItemsCommand?.continuationItems;
+             const items = (response.data && response.data.onResponseReceivedEndpoints && response.data.onResponseReceivedEndpoints && response.data.onResponseReceivedEndpoints.appendContinuationItemsAction && response.data.onResponseReceivedEndpoints.appendContinuationItemsAction.continuationItems) 
+                        || (response.data && response.data.onResponseReceivedEndpoints && response.data.onResponseReceivedEndpoints && response.data.onResponseReceivedEndpoints.reloadContinuationItemsCommand && response.data.onResponseReceivedEndpoints.reloadContinuationItemsCommand.continuationItems);
              
              if (!items) return res.json({ comments: [], continuation: null });
              
              const parsedComments = items.map(item => {
-                 const c = item.commentThreadRenderer?.comment?.commentRenderer || item.commentRenderer;
+                 const c = (item.commentThreadRenderer && item.commentThreadRenderer.comment && item.commentThreadRenderer.comment.commentRenderer) || item.commentRenderer;
                  if (!c) return null;
                  return {
-                    text: c.contentText?.runs?.map(r => r.text).join('') || c.content?.text || '',
+                    text: (c.contentText && c.contentText.runs && c.contentText.runs.map(r => r.text).join('')) || (c.content && c.content.text) || '',
                     comment_id: c.commentId,
-                    published_time: c.publishedTimeText?.runs?.?.text || '',
+                    published_time: (c.publishedTimeText && c.publishedTimeText.runs && c.publishedTimeText.runs && c.publishedTimeText.runs.text) || '',
                     author: { 
-                        id: c.authorEndpoint?.browseEndpoint?.browseId, 
-                        name: c.authorText?.simpleText || c.authorText?.runs?.?.text, 
-                        thumbnails: c.authorThumbnail?.thumbnails || [] 
+                        id: (c.authorEndpoint && c.authorEndpoint.browseEndpoint && c.authorEndpoint.browseEndpoint.browseId), 
+                        name: (c.authorText && c.authorText.simpleText) || (c.authorText && c.authorText.runs && c.authorText.runs && c.authorText.runs.text), 
+                        thumbnails: (c.authorThumbnail && c.authorThumbnail.thumbnails) || [] 
                     },
-                    like_count: c.voteCount?.simpleText || '0',
+                    like_count: (c.voteCount && c.voteCount.simpleText) || '0',
                     reply_count: c.replyCount || '0',
                     is_pinned: !!c.pinnedCommentBadge
                  };
              }).filter(c => c);
              
-             const nextContinuation = items[items.length - 1]?.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token;
+             const nextContinuation = (items[items.length - 1] && items[items.length - 1].continuationItemRenderer && items[items.length - 1].continuationItemRenderer.continuationEndpoint && items[items.length - 1].continuationItemRenderer.continuationEndpoint.continuationCommand && items[items.length - 1].continuationItemRenderer.continuationEndpoint.continuationCommand.token);
              
              return res.json({
                  comments: parsedComments,
@@ -239,17 +239,17 @@ app.get('/api/comments', async (req, res) => {
 
         res.status(200).json({
           comments: allComments.map(c => ({
-            text: c.comment?.content?.text ?? null,
-            comment_id: c.comment?.comment_id ?? null,
-            published_time: c.comment?.published_time?.text ?? c.comment?.published_time ?? null,
+            text: (c.comment && c.comment.content && c.comment.content.text) || null,
+            comment_id: (c.comment && c.comment.comment_id) || null,
+            published_time: (c.comment && c.comment.published_time && c.comment.published_time.text) || (c.comment && c.comment.published_time) || null,
             author: { 
-                id: c.comment?.author?.id ?? null, 
-                name: c.comment?.author?.name?.text ?? c.comment?.author?.name ?? null, 
-                thumbnails: c.comment?.author?.thumbnails ?? [] 
+                id: (c.comment && c.comment.author && c.comment.author.id) || null, 
+                name: (c.comment && c.comment.author && c.comment.author.name && c.comment.author.name.text) || (c.comment && c.comment.author && c.comment.author.name) || null, 
+                thumbnails: (c.comment && c.comment.author && c.comment.author.thumbnails) || [] 
             },
-            like_count: c.comment?.like_count?.toString() ?? '0',
-            reply_count: c.comment?.reply_count?.toString() ?? '0',
-            is_pinned: c.comment?.is_pinned ?? false
+            like_count: (c.comment && c.comment.like_count && c.comment.like_count.toString()) || '0',
+            reply_count: (c.comment && c.comment.reply_count && c.comment.reply_count.toString()) || '0',
+            is_pinned: (c.comment && c.comment.is_pinned) || false
           })),
           continuation: continuationToken
         });
@@ -294,10 +294,10 @@ app.get('/api/stream', async (req, res) => {
       res.json({
         title: info.title,
         duration: info.duration,
-        streamingUrl: streamingFormat?.url ?? null,
-        audioUrl: bestAudio?.url ?? null,
+        streamingUrl: (streamingFormat && streamingFormat.url) || null,
+        audioUrl: (bestAudio && bestAudio.url) || null,
         formats: combinedFormats.map(f => ({
-          quality: f.format_note || `${f.height}p`,
+          quality: f.format_note || (f.height + "p"),
           height: f.height,
           container: f.ext,
           url: f.url
@@ -351,25 +351,25 @@ app.get('/api/channel', async (req, res) => {
         }
     }
     
-    const title = channel.metadata?.title || channel.header?.title?.text || channel.header?.author?.name || null;
-    let avatar = channel.metadata?.avatar || channel.header?.avatar || channel.header?.author?.thumbnails || null;
+    const title = (channel.metadata && channel.metadata.title) || (channel.header && channel.header.title && channel.header.title.text) || (channel.header && channel.header.author && channel.header.author.name) || null;
+    let avatar = (channel.metadata && channel.metadata.avatar) || (channel.header && channel.header.avatar) || (channel.header && channel.header.author && channel.header.author.thumbnails) || null;
     if (Array.isArray(avatar) && avatar.length > 0) avatar = avatar.url;
-    else if (typeof avatar === 'object' && avatar?.url) avatar = avatar.url;
+    else if (typeof avatar === 'object' && avatar && avatar.url) avatar = avatar.url;
 
-    let banner = channel.metadata?.banner || channel.header?.banner || null;
+    let banner = (channel.metadata && channel.metadata.banner) || (channel.header && channel.header.banner) || null;
     if (Array.isArray(banner) && banner.length > 0) banner = banner.url;
-    else if (typeof banner === 'object' && banner?.url) banner = banner.url;
+    else if (typeof banner === 'object' && banner && banner.url) banner = banner.url;
     else if (typeof banner !== 'string') banner = null; 
 
     res.status(200).json({
       channel: {
         id: channel.id, 
         name: title, 
-        description: channel.metadata?.description || null,
+        description: (channel.metadata && channel.metadata.description) || null,
         avatar: avatar, 
         banner: banner,
-        subscriberCount: channel.metadata?.subscriber_count?.pretty || '非公開', 
-        videoCount: channel.metadata?.videos_count?.text ?? channel.metadata?.videos_count ?? '0'
+        subscriberCount: (channel.metadata && channel.metadata.subscriber_count && channel.metadata.subscriber_count.pretty) || '非公開', 
+        videoCount: (channel.metadata && channel.metadata.videos_count && channel.metadata.videos_count.text) || (channel.metadata && channel.metadata.videos_count) || '0'
       },
       page: targetPage, 
       videos: videosToReturn,
@@ -420,19 +420,19 @@ app.get('/api/channel-community', async (req, res) => {
     if (!id) return res.status(400).json({ error: "Missing channel id" });
     const channel = await youtube.getChannel(id);
     const community = await channel.getCommunity();
-    const posts = community.posts?.map(post => ({
+    const posts = (community.posts && community.posts.map(post => ({
         id: post.id,
-        text: post.content?.text || "",
+        text: (post.content && post.content.text) || "",
         publishedTime: post.published.text,
-        likeCount: post.vote_count?.text || "0",
-        author: { name: post.author.name, avatar: post.author.thumbnails?.url },
+        likeCount: (post.vote_count && post.vote_count.text) || "0",
+        author: { name: post.author.name, avatar: post.author.thumbnails && post.author.thumbnails.url },
         attachment: post.attachment ? {
             type: post.attachment.type,
-            images: post.attachment.images?.map(i => i.url),
-            choices: post.attachment.choices?.map(c => c.text.text),
-            videoId: post.attachment.video?.id
+            images: post.attachment.images && post.attachment.images.map(i => i.url),
+            choices: post.attachment.choices && post.attachment.choices.map(c => c.text.text),
+            videoId: post.attachment.video && post.attachment.video.id
         } : null
-    })) || [];
+    }))) || [];
     res.status(200).json({ posts });
   } catch (err) {
       res.status(200).json({ posts: [] });
@@ -462,7 +462,7 @@ app.get('/api/playlist', async (req, res) => {
     const youtube = await createYoutube();
     const { id } = req.query;
     const playlist = await youtube.getPlaylist(id);
-    if (!playlist.info?.id) return res.status(404).json({ error: "Playlist not found"});
+    if (!(playlist.info && playlist.info.id)) return res.status(404).json({ error: "Playlist not found"});
     res.status(200).json(playlist);
   } catch (err) { 
       res.status(500).json({ error: err.message }); 
@@ -535,11 +535,11 @@ app.get('/api/transcript', async (req, res) => {
     const info = await youtube.getInfo(id);
     const transcriptInfo = await info.getTranscript();
     
-    const segments = transcriptInfo?.transcript?.content?.body?.initial_segments?.map(seg => ({
-      text: seg.snippet?.text,
+    const segments = (transcriptInfo && transcriptInfo.transcript && transcriptInfo.transcript.content && transcriptInfo.transcript.content.body && transcriptInfo.transcript.content.body.initial_segments && transcriptInfo.transcript.content.body.initial_segments.map(seg => ({
+      text: seg.snippet && seg.snippet.text,
       startTime: seg.start_ms,
       endTime: seg.end_ms
-    })) || [];
+    }))) || [];
 
     res.status(200).json({ segments });
   } catch (err) {
@@ -600,8 +600,8 @@ app.get('/api/music/lyrics', async (req, res) => {
 
     const lyrics = await youtube.music.getLyrics(id);
     res.status(200).json({
-       text: lyrics?.text || "No lyrics available",
-       footer: lyrics?.footer
+       text: (lyrics && lyrics.text) || "No lyrics available",
+       footer: (lyrics && lyrics.footer)
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
