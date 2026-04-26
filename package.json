@@ -1,11 +1,18 @@
 {
   "name": "youtube-shorts-api-v2",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "main": "api/index.js",
   "type": "module",
+  "scripts": {
+    "start": "node api/index.js",
+    "dev": "nodemon api/index.js"
+  },
   "dependencies": {
-    "express": "^4.18.2",
-    "node-fetch": "^3.3.1",
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
     "youtubei.js": "^12.2.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   }
 }
